@@ -48,7 +48,7 @@ def on_message(client, userdata, msg):
         print(f"\n[Warning] Error parsing message: {e}")
 
 # --- Engine Setup ---
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2) # type: ignore
 client.on_connect = on_connect
 client.on_message = on_message
 
