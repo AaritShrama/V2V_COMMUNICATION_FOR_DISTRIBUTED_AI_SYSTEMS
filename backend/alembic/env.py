@@ -10,7 +10,7 @@ from alembic import context
 config = context.config
 config.set_main_option(
     "sqlalchemy.url",
-    settings.DATABASE_URL
+    str(settings.DATABASE_URL).replace("%","%%")
 )
 
 # Interpret the config file for Python logging.

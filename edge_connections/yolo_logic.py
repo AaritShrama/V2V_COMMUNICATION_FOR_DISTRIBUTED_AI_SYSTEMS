@@ -13,7 +13,7 @@ class HazardDetector:
         hazard_detected = False
         
         for result in results:
-            for box in result.boxes:
+            for box in result.boxes: # type: ignore
                 class_id = int(box.cls[0])
                 # Class 0 = Person, Class 1 = Bicycle
                 if class_id in [0, 1]: 

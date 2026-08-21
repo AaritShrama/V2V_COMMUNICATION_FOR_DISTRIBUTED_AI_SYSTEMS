@@ -1,67 +1,66 @@
-import h3
-import json
-import time
-import paho.mqtt.client as mqtt
 import sys
 import os
+import json 
+import requests 
+import paho.mqtt.client as mqtt
+
+# --- 1. SYSTEM PATH FIX ---
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from backend.app.schemas.semantic_message import SemanticMessage
 
-# Device B current GPS position
-CURRENT_LAT = 37.7749
-CURRENT_LNG = -122.4194
+# --- 2. NETWORK SETUP ---
+MQTT_BROKER = "broker.hivemq.com"
+MQTT_PORT = 8000  # WebSockets port to bypass Wi-Fi blocks
+MQTT_TOPIC = "intelligence/+/hazard"
 
-def get_h3_topics(lat, lng, resolution=9):
-    center_hex = h3.latlng_to_cell(lat, lng, resolution)
-    regional_hexes = h3.grid_disk(center_hex, 1)
-    return center_hex, [f"intelligence/{h}/#" for h in regional_hexes]
-
+# --- 3. MQTT CALLBACKS ---
 def on_connect(client, userdata, flags, reason_code, properties):
-    if reason_code == 0:
-        print("\n✅ [System] Connected to MQTT Broker Successfully!")
-        
-        # We moved the subscribe logic inside on_connect. 
-        # This ensures if the connection drops and reconnects, it automatically re-subscribes!
-        center_hex, topics = get_h3_topics(CURRENT_LAT, CURRENT_LNG)
-        print(f"[Vehicle B] Location Hex: {center_hex}")
-        for topic in topics:
-            print(f"  [+] Subscribed to: {topic}")
-            client.subscribe(topic)
-    else:
-        print(f"❌ [System] Connection failed: {reason_code}")
+    print(f"\n[Vehicle B] Connected to HiveMQ Network (Code: {reason_code})")
+    client.subscribe(MQTT_TOPIC)
+    print(f"[Vehicle B] Listening for hazard broadcasts on: {MQTT_TOPIC}")
 
 def on_message(client, userdata, msg):
+    """Triggered instantly whenever Vehicle A broadcasts a hazard."""
+    print("\n" + "!"*50)
+    print("🚨 [WARNING] V2V ALERT RECEIVED 🚨")
+
     try:
-        raw_json = msg.payload.decode('utf-8')
-        data: SemanticMessage = SemanticMessage.model_validate_json(raw_json)
-        
-        print("\n" + "="*50)
-        print(f"🚨 [INTELLIGENCE RECEIVED] Topic: {msg.topic}")
-        print(f" ├─ Vehicle ID    : {data.vehicle_id}")
-        print(f" ├─ Event Type    : {data.event_type.upper()} ({data.object_type})")
-        print(f" ├─ Risk Level    : {data.risk_level} (Confidence: {int(data.confidence * 100)}%)")
-        print(f" ├─ Description   : {data.description}")
-        print(f" └─ Recommendation: {data.recommendation.upper()}")
-        print("="*50)
-        
+        # Decode the raw JSON string
+        payload_str = msg.payload.decode('utf-8')
+
+        # Validate the incoming data using the backend schema
+        alert = SemanticMessage.model_validate_json(payload_str)
+
+        # Display the alert on Vehicle B's dashboard
+        print(f"   From Node : {alert.vehicle_id}")
+        print(f"   Event     : {alert.event_type.upper()}")
+        print(f"   Risk Level: {alert.risk_level}")
+        print(f"   Detail    : {alert.description}")
+        print(f"   Action    : {alert.recommendation}")
+
+        # --- DATABASE FORWARDING ---
+        payload_dict = json.loads(payload_str)
+        response = requests.post("http://localhost:8000/events", json=payload_dict)
+        print(f"   Cloud Sync: Status {response.status_code}")
+        # -------------------------------
+
     except Exception as e:
-        print(f"\n[Warning] Error parsing message: {e}")
+        print(f"[Error] Failed to parse or sync data: {e}")
 
-# --- Engine Setup ---
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2) # type: ignore
-client.on_connect = on_connect
-client.on_message = on_message
+    print("!"*50 + "\n")
 
-print("Connecting to MQTT Broker...")
-# Switching to HiveMQ as it is often more stable for testing
-client.connect("broker.hivemq.com", 1883) 
-client.loop_start()
 
-print("\n[Vehicle B] Listening for semantic intelligence... Press Ctrl+C to exit.")
+# --- 4. START RECEIVER LOOP ---
+print("[System] Booting Vehicle B Receiver Node...")
+
+client_mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, transport="websockets") # type: ignore
+client_mqtt.on_connect = on_connect
+client_mqtt.on_message = on_message
+
+client_mqtt.connect(MQTT_BROKER, MQTT_PORT)
 
 try:
-    while True:
-        time.sleep(1)
+    client_mqtt.loop_forever()
 except KeyboardInterrupt:
-    client.loop_stop()
-    client.disconnect()
+    print("\n[System] Shutting down Vehicle B.")
+    client_mqtt.disconnect()
