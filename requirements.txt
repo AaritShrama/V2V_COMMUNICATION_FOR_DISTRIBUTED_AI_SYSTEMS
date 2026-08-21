@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+sqlalchemy
+alembic
+psycopg2-binary
+python-dotenv
+opencv-python
+paho-mqtt
+h3
+ollama
+requests
+ultralytics
