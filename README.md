@@ -1,609 +1,490 @@
 # DIVA
-## Distributive Intelligence for Vehicle Automativity
 
-DIVA is a distributed AI system for Vehicle-to-Vehicle (V2V) communication, designed to enable autonomous vehicles to share meaningful environmental information with nearby vehicles.
+## Distributed Intelligence for Vehicle Autonomy
 
-Instead of transmitting raw camera feeds between vehicles, DIVA allows each vehicle to process its own surroundings locally and communicate compact semantic information such as detected hazards, confidence levels, positions, and recommended actions.
+DIVA is a prototype Vehicle-to-Vehicle (V2V) system in which each vehicle runs a local vision-language model on its own camera feed and broadcasts **compact semantic messages** — not raw video — to nearby vehicles.
 
-The goal is to demonstrate how distributed intelligence can make autonomous vehicles safer, faster, and more efficient by allowing vehicles to collectively understand their surroundings.
+Instead of transmitting a 10 MB video stream, a vehicle transmits roughly 300 bytes:
 
----
-
-## 🚗 Core Idea
-
-Traditional autonomous vehicles primarily rely on their own sensors and perception systems.
-
-DIVA introduces another layer:
-```
-Vehicle A
-    ↓
-Local AI Perception
-    ↓
-Semantic Message
-    ↓
-V2V Communication
-    ↓
-Vehicle B
-    ↓
-Local Decision Making
-```
-
-For example, Vehicle A may detect an overturned truck around a blind corner.
-
-Instead of sending the entire camera feed, Vehicle A can send:
-```
+```json
 {
-    "vehicle_id": "vehicle_A",
-    "event_type": "hazard",
-    "object_type": "overturned_truck",
-    "confidence": 0.92,
-    "risk_level": "HIGH",
-    "position": {
-        "latitude": 28.6139,
-        "longitude": 77.209
-    },
-    "description": "Overturned truck blocking the road",
-    "recommendation": "Reduce speed and change lane if safe"
+  "vehicle_id": "Vehicle_A_Node",
+  "event_type": "emergency",
+  "object_type": "overturned_truck",
+  "confidence": 0.92,
+  "risk_level": "CRITICAL",
+  "position": { "latitude": 37.7750, "longitude": -122.4190 },
+  "description": "An overturned truck is blocking the right lane.",
+  "recommendation": "change_lane_if_safe",
+  "timestamp": "2026-08-22T10:14:03.221Z"
 }
 ```
 
-Vehicle B can then use this information to react before the hazard becomes visible to its own sensors.
+A receiving vehicle can act on this before the hazard enters its own sensor range.
+
+> **Scope note.** This is a working prototype built for a hackathon, not a production or road-safe system. The [Known Limitations](#known-limitations) section is deliberately detailed — please read it before evaluating the project.
 
 ---
 
-## 🧠 Why Distributed Intelligence?
+## Table of Contents
 
-A vehicle does not need to independently perceive everything around it.
-
-Nearby vehicles can act as additional sources of perception.
-
-This creates a distributed intelligence system where:
-
-- Each vehicle processes its own sensor data.
-- Vehicles exchange semantic information.
-- Important information can reach vehicles outside direct line-of-sight.
-- Bandwidth requirements are significantly lower than transmitting raw video.
-- Vehicles can collectively build a better understanding of their surroundings.
-
----
-
-## 🏗️ System Architecture
-
-DIVA is designed as a modular distributed architecture.
-
-### Vehicle Layer
-
-Each vehicle contains:
-
-- Camera / sensor input
-- Local perception model
-- Semantic message generation
-- V2V communication client
-- Local memory
-- Decision-making logic
-
-### Communication Layer
-
-The prototype supports communication between vehicles using messaging and persistent connections.
-
-Current components include:
-
-- FastAPI
-- WebSockets
-- RabbitMQ
-- Redis
-
-### Backend Layer
-
-The backend provides:
-
-- Vehicle connections
-- Semantic event reception
-- Message broadcasting
-- Event persistence
-- Vehicle state management
-- Communication APIs
-
-### Database Layer
-
-PostgreSQL is used for persistent storage through SQLAlchemy and Alembic.
-
-The database stores structured information such as:
-
-- Vehicles
-- Detected events
-- Semantic messages
-- Event metadata
+- [What Is Implemented](#what-is-implemented)
+- [Architecture](#architecture)
+- [The Semantic Message Contract](#the-semantic-message-contract)
+- [Repository Layout](#repository-layout)
+- [Requirements](#requirements)
+- [Setup](#setup)
+- [Running the Demo](#running-the-demo)
+- [Backend API](#backend-api)
+- [Database](#database)
+- [Configuration Reference](#configuration-reference)
+- [Known Limitations](#known-limitations)
+- [Roadmap](#roadmap)
+- [Team](#team)
+- [License](#license)
 
 ---
 
-## 🔄 Communication Pipeline
+## What Is Implemented
 
-The current prototype follows this general pipeline:
+Everything in this table exists in the repository and runs today.
+
+| Component | Status | File |
+|---|---|---|
+| Local VLM perception (Ollama / moondream) | ✅ Working | `edge_connections/ai_models.py` |
+| Schema-constrained JSON output from the VLM | ✅ Working | `ai_models.py` (`format=` argument) |
+| Vehicle A publisher loop (video → AI → MQTT) | ✅ Working | `edge_connections/vehicle_a_main.py` |
+| H3 geospatial topic addressing | ✅ Working | `vehicle_a_main.py` |
+| Vehicle B subscriber + alert display | ✅ Working | `edge_connections/vehicle_b_reciever.py` |
+| MQTT transport over public broker | ✅ Working | both vehicle scripts |
+| Shared Pydantic contract across all layers | ✅ Working | `backend/app/schemas/semantic_message.py` |
+| FastAPI backend + event persistence | ✅ Working | `backend/app/main.py` |
+| PostgreSQL storage via SQLAlchemy 2.0 | ✅ Working | `backend/app/models/` |
+| Alembic migrations | ✅ Working | `backend/alembic/` |
+| Event inspection CLI | ✅ Working | `backend/view_events.py` |
+| WebSocket connection manager | ⚠️ Built, **not used by the vehicle clients** | `backend/app/websocket/` |
+| YOLOv8 detector class | ⚠️ Written, **not yet wired into the pipeline** | `edge_connections/yolo_logic.py` |
+
+Anything not in this table — Redis, RabbitMQ, Docker, MQTT-over-TLS, multi-vehicle fleets — is on the [Roadmap](#roadmap) and is **not** implemented.
+
+---
+
+## Architecture
+
+The implemented data flow is MQTT-based:
+
 ```
-Camera / Video
-        ↓
-Local Perception
-        ↓
-Semantic Event
-        ↓
-FastAPI Backend
-        ↓
-Message Broker
-        ↓
-Target Vehicle
-        ↓
-Redis Memory
-        ↓
-Decision
+                    ┌──────────────── VEHICLE A (Laptop A) ────────────────┐
+                    │                                                      │
+   test.mp4  ──────►│  OpenCV frame capture                                │
+                    │        ↓  (every 2 seconds)                          │
+                    │  Ollama VLM (moondream)                              │
+                    │        ↓                                             │
+                    │  SemanticMessage (schema-validated JSON)             │
+                    │        ↓  (only if event_type != "normal")           │
+                    │  MQTT publish → intelligence/{h3_cell}/hazard        │
+                    └───────────────────────┬──────────────────────────────┘
+                                            │
+                              broker.hivemq.com:8000 (WebSocket)
+                                            │
+                    ┌───────────────────────▼──────────────────────────────┐
+                    │  MQTT subscribe → intelligence/+/hazard              │
+                    │        ↓                                             │
+                    │  Pydantic re-validation                              │
+                    │        ↓                                             │
+                    │  Alert printed to Vehicle B dashboard                │
+                    │        ↓                                             │
+                    │  HTTP POST → FastAPI /events                         │
+                    └───────────────────────┬──────────────────────────────┘
+                    └──────────── VEHICLE B (Laptop B) ────────────────────┘
+                                            │
+                    ┌───────────────────────▼──────────────────────────────┐
+                    │  FastAPI backend → SQLAlchemy → PostgreSQL           │
+                    └──────────────────────────────────────────────────────┘
 ```
 
-The important design principle is that vehicles exchange **semantic information rather than raw sensor data**.
+### Design principles
+
+**Semantic over raw.** Perception happens at the edge. Only the meaning is transmitted. Bandwidth drops by roughly four orders of magnitude versus video streaming.
+
+**One schema, four layers.** `SemanticMessage` is a single Pydantic model used as the LLM output grammar, the MQTT wire format, the API request body, and the ORM mapping source. A malformed message cannot enter the system at any layer.
+
+**Geospatial addressing.** Vehicle A converts its GPS position to an [H3](https://h3geo.org/) cell (resolution 9, ~174 m edge) and publishes to a topic derived from that cell. MQTT topic matching then acts as a coarse geographic filter. See [Known Limitations](#known-limitations) — the current subscriber does not yet exploit this.
 
 ---
 
-## 📡 V2V Communication
+## The Semantic Message Contract
 
-For the prototype, communication can be demonstrated using two laptops representing two vehicles.
+Defined in `backend/app/schemas/semantic_message.py`.
 
-### Vehicle A
+| Field | Type | Constraint |
+|---|---|---|
+| `vehicle_id` | `str` | — |
+| `event_type` | `Literal` | `hazard` \| `obstacle` \| `traffic` \| `emergency` \| `normal` |
+| `object_type` | `str` | — |
+| `confidence` | `float` | `0.0 ≤ x ≤ 1.0` |
+| `risk_level` | `Literal` | `LOW` \| `MEDIUM` \| `HIGH` \| `CRITICAL` |
+| `position` | `Position` | `{ latitude: float, longitude: float }` |
+| `description` | `str` | one sentence, enforced by prompt |
+| `recommendation` | `str` | e.g. `slow_down`, `change_lane_if_safe` |
+| `timestamp` | `datetime` | ISO 8601 |
 
-Vehicle A processes a video and detects an event.
-
-Example:
-
-Vehicle A
-    ↓
-Hazard detected
-    ↓
-Semantic message generated
-    ↓
-Message sent
-    ↓
-Vehicle B
-
-### Vehicle B
-
-Vehicle B receives the semantic message and can use it to make an informed decision.
-
-Example:
-
-Received:
-
-Hazard: pedestrian
-Confidence: 0.96
-Recommendation: slow_down
-
-Vehicle B can then incorporate this information into its local decision-making process.
+This model is passed directly to Ollama as `format=SemanticMessage.model_json_schema()`, which constrains the model's decoding so it cannot emit a structurally invalid message.
 
 ---
 
-## ⚡ Redis
+## Repository Layout
 
-Redis is used as a fast temporary memory layer.
-
-Vehicle-specific memories can be stored using keys such as:
-
-vehicle:A:memory:pedestrian
-
-vehicle:B:memory:pothole
-
-Each memory can have a TTL so that outdated hazards automatically expire.
-
-This is important because road conditions are dynamic.
-
-For example:
-
-Hazard detected
-        ↓
-Stored in Redis
-        ↓
-Vehicle uses information
-        ↓
-Memory expires after TTL
-        ↓
-Stale information removed
-
-This prevents old hazards from remaining permanently active.
-
----
-
-## 🐇 RabbitMQ
-
-RabbitMQ is used as the messaging layer in the distributed communication architecture.
-
-The prototype uses a topic exchange:
-
-vehicle_topics
-
-Vehicles can communicate using routing keys such as:
-
-to.A
-
-to.B
-
-This allows messages to be directed toward specific vehicles while maintaining a scalable messaging architecture.
-
----
-
-## 🔌 FastAPI Backend
-
-The backend is implemented using FastAPI.
-
-Important endpoints include:
-
-GET /health
-
-Used to verify that the backend is running.
-
-POST /events
-
-Used to receive semantic events.
-
-WebSocket:
-
-/ws/{vehicle_id}
-
-Used for persistent vehicle connections and real-time communication.
-
-Example:
-
-Vehicle A
-    ↓
-WebSocket
-    ↓
-Backend
-    ↓
-Broadcast / routing
-    ↓
-Vehicle B
-
----
-
-## 🗄️ PostgreSQL
-
-PostgreSQL provides persistent storage for information that should survive beyond the lifetime of a Redis memory entry.
-
-The project uses:
-
-- PostgreSQL
-- SQLAlchemy
-- Alembic
-
-Alembic manages database schema migrations.
-
-For example:
-
-Python SQLAlchemy Models
-        ↓
-Alembic Migration
-        ↓
-PostgreSQL
-
----
-
-## 🤖 AI Layer
-
-The AI layer is responsible for converting raw sensor information into meaningful semantic information.
-
-The intended pipeline is:
-
-Video
-  ↓
-Object / Scene Detection
-  ↓
-AI Reasoning
-  ↓
-Semantic Event
-  ↓
-V2V Message
-
-The system is designed to support local AI processing so that vehicles do not need to continuously upload raw video to a central server.
-
----
-
-## 🧩 Semantic Communication
-
-One of the main ideas behind DIVA is semantic communication.
-
-Instead of transmitting:
-
-10 MB video
-
-the vehicle transmits something closer to:
-
-{
-    "hazard": "accident",
-    "confidence": 0.94,
-    "risk": "HIGH",
-    "recommendation": "slow_down"
-}
-
-This drastically reduces the amount of information that needs to be transmitted while preserving the information that matters for decision making.
-
----
-
-## 🧪 Current Demo
-
-The planned demonstration uses two laptops.
-
-### Laptop A
-
-Represents Vehicle A.
-
-It:
-
-1. Processes a video.
-2. Detects an environmental event.
-3. Generates a semantic message.
-4. Sends the message through the communication layer.
-
-### Laptop B
-
-Represents Vehicle B.
-
-It:
-
-1. Receives the semantic message.
-2. Stores relevant information in temporary memory.
-3. Displays the received hazard.
-4. Uses the information for a local decision.
-
-This demonstrates distributed perception without requiring two physical autonomous vehicles.
-
----
-
-## 📁 Project Structure
 ```
-backend/
+.
+├── alembic.ini
+├── requirements.txt
+├── .env.example
+├── README.md
 │
-├── alembic/
-│   ├── versions/
-│   ├── env.py
-│   └── script.py.mako
+├── backend/
+│   ├── alembic/
+│   │   ├── versions/
+│   │   │   └── d29adea8a8ce_init.py     # creates events + vehicles tables
+│   │   ├── env.py
+│   │   └── script.py.mako
+│   │
+│   ├── app/
+│   │   ├── core/
+│   │   │   └── config.py                # pydantic-settings, reads .env
+│   │   ├── db/
+│   │   │   ├── database.py              # engine + declarative Base
+│   │   │   └── session.py               # SessionLocal + get_db dependency
+│   │   ├── models/
+│   │   │   ├── event.py                 # Event ORM model
+│   │   │   └── vehicle.py               # Vehicle ORM model (not yet used)
+│   │   ├── schemas/
+│   │   │   └── semantic_message.py      # the shared contract
+│   │   ├── websocket/
+│   │   │   ├── manager.py               # ConnectionManager
+│   │   │   └── handlers.py              # /ws/{vehicle_id} route
+│   │   └── main.py                      # FastAPI app
+│   │
+│   ├── test_db.py                       # DB connectivity check
+│   └── view_events.py                   # print stored events
 │
-├── app/
-│   ├── core/
-│   │
-│   ├── db/
-│   │   ├── database.py
-│   │   └── session.py
-│   │
-│   ├── models/
-│   │   ├── vehicle.py
-│   │   └── event.py
-│   │
-│   ├── schemas/
-│   │   └── semantic_message.py
-│   │
-│   ├── websocket/
-│   │   ├── handlers.py
-│   │   └── manager.py
-│   │
-│   └── main.py
-│
-├── tests/
-│
-└── requirements.txt
+└── edge_connections/
+    ├── ai_models.py                     # Ollama VLM wrappers + prompt
+    ├── vehicle_a_main.py                # publisher node
+    ├── vehicle_b_reciever.py            # subscriber node
+    ├── yolo_logic.py                    # YOLOv8 detector (not yet wired in)
+    └── test.mp4                         # sample dashcam footage
 ```
-Additional components such as AI inference, Redis, RabbitMQ, and vehicle clients can be organized as separate modules as the system develops.
 
 ---
 
-## 🛠️ Technologies
+## Requirements
 
-### Backend
+- **Python 3.10+** (the codebase uses `str | None` union syntax)
+- **[Ollama](https://ollama.com/)** installed and running locally, with the `moondream` model pulled
+- **PostgreSQL** — a hosted Supabase instance or a local server
+- A machine that can run a small VLM. CPU-only works but inference takes 2–5 s per frame.
 
-- Python
-- FastAPI
-- Uvicorn
+`requirements.txt`:
 
-### AI
+```
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+sqlalchemy
+alembic
+psycopg2-binary
+python-dotenv
+opencv-python
+paho-mqtt
+h3
+ollama
+requests
+ultralytics
+```
 
-- Computer Vision
-- Local AI inference
-- Gemma / LLM-based reasoning
+---
+
+## Setup
+
+**1. Clone and enter the project**
+
+```bash
+git clone https://github.com/AaritShrama/V2V_COMMUNICATION_FOR_DISTRIBUTED_AI_SYSTEMS.git
+cd V2V_COMMUNICATION_FOR_DISTRIBUTED_AI_SYSTEMS
+```
+
+**2. Create and activate a virtual environment**
+
+```bash
+python -m venv .venv
+
+# Windows
+.venv\Scripts\activate
+
+# macOS / Linux
+source .venv/bin/activate
+```
+
+**3. Install dependencies**
+
+```bash
+pip install -r requirements.txt
+```
+
+**4. Configure environment variables**
+
+Copy `.env.example` to `.env` in the project root and fill in your own database URL:
+
+```env
+DATABASE_URL=postgresql://username:password@host:5432/database
+```
+
+> `DATABASE_URL` has **no default value** in `config.py`. The application will refuse to start if `.env` is missing. This is intentional — credentials must never be committed to the repository.
+
+**5. Set up the AI model**
+
+```bash
+ollama pull moondream
+ollama serve        # if not already running as a service
+```
+
+**6. Apply database migrations**
+
+```bash
+alembic upgrade head
+```
+
+**7. Verify the database connection**
+
+```bash
+python -m backend.test_db
+# expected: Database connection successful: 1
+```
+
+---
+
+## Running the Demo
+
+The demo uses two machines (or two terminals on one machine) representing Vehicle A and Vehicle B.
+
+### Terminal 1 — Backend
+
+Run from the project root:
+
+```bash
+python -m uvicorn backend.app.main:app --reload
+```
+
+Available at `http://127.0.0.1:8000`, interactive docs at `http://127.0.0.1:8000/docs`.
+
+### Terminal 2 — Vehicle B (receiver)
+
+Start the receiver **before** the publisher so it does not miss the first broadcast.
+
+```bash
+cd edge_connections
+python vehicle_b_reciever.py
+```
+
+Vehicle B connects to the broker, subscribes to `intelligence/+/hazard`, and forwards every validated alert to the backend.
+
+### Terminal 3 — Vehicle A (publisher)
+
+```bash
+cd edge_connections
+python vehicle_a_main.py
+```
+
+Vehicle A plays `test.mp4` in an OpenCV window, sends a frame to the VLM every 2 seconds, and publishes any non-`normal` result to its H3 topic. Press **`q`** in the video window to quit.
+
+> **Note:** the video window freezes during inference. The VLM call is synchronous and blocks the render loop for 2–5 seconds per scan. This is a known issue — see [Known Limitations](#known-limitations).
+
+### Expected output
+
+**Vehicle A:**
+```
+[System] Starting Time-Based Edge AI Pipeline...
+
+[10:14:03] ⏱️ 2 Seconds passed! Scanning frame...
+   -> Result: EMERGENCY | Risk: CRITICAL
+   -> Detail: A person is lying in the roadway ahead.
+   -> [MQTT] Broadcasting threat to Hex: 8928308280fffff
+```
+
+**Vehicle B:**
+```
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+🚨 [WARNING] V2V ALERT RECEIVED 🚨
+   From Node : Vehicle_A_Node
+   Event     : EMERGENCY
+   Risk Level: CRITICAL
+   Detail    : A person is lying in the roadway ahead.
+   Action    : stop_if_necessary
+   Cloud Sync: Status 200
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+```
+
+### Inspecting stored events
+
+```bash
+python -m backend.view_events
+```
+
+---
+
+## Backend API
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness check. Returns `{"status": "healthy", "service": "av-backend"}`. |
+| `POST` | `/events` | Accepts a `SemanticMessage`, persists it, returns the assigned `event_id`. |
+| `WS` | `/ws/{vehicle_id}` | Persistent vehicle connection. Messages received are broadcast to all connected clients. |
+
+**`POST /events`** performs full Pydantic validation before writing. An out-of-range `confidence` or an unrecognised `risk_level` is rejected with `422`.
+
+**`/ws/{vehicle_id}`** is implemented and functional, but the current vehicle clients communicate over MQTT and do not connect to it. It exists as the foundation for the planned broker-mediated routing described in the [Roadmap](#roadmap).
+
+---
+
+## Database
+
+Two tables, created by migration `d29adea8a8ce_init`.
+
+**`events`** — one row per received semantic message.
+
+| Column | Type |
+|---|---|
+| `id` | `Integer`, PK, autoincrement |
+| `vehicle_id` | `String(50)` |
+| `event_type` | `String(30)` |
+| `object_type` | `String(100)` |
+| `confidence` | `Float` |
+| `risk_level` | `String(20)` |
+| `latitude`, `longitude` | `Float` |
+| `description` | `String(500)` |
+| `recommendation` | `String(500)` |
+| `timestamp` | `DateTime` |
+
+**`vehicles`** — schema for fleet registration (`vehicle_id`, `status`, `last_seen`). The table is created but **not yet written to**; vehicle registration is on the roadmap.
+
+### Migration commands
+
+```bash
+alembic revision --autogenerate -m "description"   # after changing models
+alembic upgrade head                                # apply
+alembic downgrade -1                                # roll back one revision
+```
+
+---
+
+## Configuration Reference
+
+Values currently hardcoded in the source. Moving these to environment variables is on the roadmap.
+
+| Value | Location | Current setting |
+|---|---|---|
+| `DATABASE_URL` | `.env` | *(required, no default)* |
+| Vehicle A position | `vehicle_a_main.py` | `37.7750, -122.4190` (static) |
+| H3 resolution | `vehicle_a_main.py` | `9` (~174 m edge) |
+| AI scan interval | `vehicle_a_main.py` | `2.0` seconds |
+| MQTT broker | both vehicle scripts | `broker.hivemq.com:8000`, WebSocket transport |
+| Publish topic | `vehicle_a_main.py` | `intelligence/{h3_cell}/hazard` |
+| Subscribe topic | `vehicle_b_reciever.py` | `intelligence/+/hazard` |
+| Backend URL | `vehicle_b_reciever.py` | `http://localhost:8000/events` |
+| VLM model | `vehicle_a_main.py` | `moondream` (swappable: `llava`, `paligemma`) |
+
+Port `8000` is used for MQTT-over-WebSocket because raw MQTT port `1883` is frequently blocked on public and campus Wi-Fi.
+
+---
+
+## Known Limitations
+
+We are documenting these openly rather than omitting them.
+
+### Security
+
+**There is no authentication of any kind.** Messages travel over a public, unauthenticated, unencrypted broker (`ws://`, not `wss://`). Any party who knows the topic structure can publish a fabricated `CRITICAL` alert that every listening vehicle will accept and act on. `vehicle_id` is a self-declared string with no verification, and there is no replay protection — a captured message can be rebroadcast indefinitely.
+
+Production V2V solves this with IEEE 1609.2 certificates and rotating pseudonyms. Message signing and freshness checks are the highest-priority roadmap item.
+
+The `POST /events` endpoint is likewise unauthenticated and unrated-limited.
+
+### Perception
+
+- **`confidence` is self-reported by the language model.** It is a generated token, not a calibrated probability, and should not be treated as a statistical measure of certainty.
+- **Latency is 2–5 seconds per scan on CPU.** At 60 km/h that is 33–83 m of travel. DIVA is therefore suited to *persistent* hazards beyond sensor range — a stalled vehicle, debris, crash aftermath — and **not** to split-second collision avoidance.
+- **A failed or truncated model response is silently dropped.** The code cannot currently distinguish "nothing detected" from "inference failed."
+- **YOLOv8 is not yet in the pipeline.** `yolo_logic.py` is written but unused.
 
 ### Communication
 
-- WebSockets
-- RabbitMQ
-- MQTT where required
+- **The H3 geofilter is not yet enforced on the receiving side.** Vehicle A addresses its H3 cell correctly, but Vehicle B subscribes with a `+` wildcard and therefore accepts hazards from every cell on Earth. Distance-based filtering is not yet implemented.
+- **Neighbouring cells are not covered.** Publishing to a single resolution-9 cell means a vehicle one cell behind — arguably the one that most needs the warning — will not match the topic once wildcard subscription is replaced with proper filtering. `h3.grid_disk` is required.
+- **The system depends on a single public broker.** A "distributed" system routed through one third-party server is centralised in practice.
 
-### Memory
+### State and data
 
-- Redis
+- **No deduplication and no expiry.** The same stationary hazard is re-detected and re-broadcast every 2 seconds, producing repeated alerts and duplicate database rows for a single real-world event.
+- **Vehicle position is static.** `CURRENT_LAT` / `CURRENT_LNG` are constants, so H3 cells never change during a run.
+- **`timestamp` is stored in a timezone-naive column** while the pipeline generates timezone-aware UTC values; the offset is dropped on write.
 
-### Database
+### Engineering
 
-- PostgreSQL
-- SQLAlchemy
-- Alembic
-
-### Development
-
-- Git
-- GitHub
-- VS Code
+- **No automated tests.**
+- **Vehicle B does not act on alerts.** It displays and persists them; there is no fusion or decision logic.
+- **The `vehicles` table is unused.**
+- **`vehicle_b_reciever.py` is misspelled** and will be renamed.
 
 ---
 
-## 🚀 Getting Started
+## Roadmap
 
-Clone the repository:
-```
-git clone https://github.com/AaritShrama/Distributed-AI-System-For-V2V-Communication.git
-```
-Move into the project:
-```
-cd Distributed-AI-System-For-V2V-Communication
-```
-Create a virtual environment:
-```
-python -m venv .venv
-```
-Activate it on Windows:
-```
-.venv\Scripts\activate
-```
-Install dependencies:
-```
-pip install -r requirements.txt
-```
----
+Ordered by priority. None of the following is implemented.
 
-## ⚙️ Environment Variables
+**Correctness and safety**
+1. HMAC message signing and timestamp freshness checks to reject spoofed and replayed alerts.
+2. Receiver-side geographic filtering; `h3.grid_disk` publishing to cover adjacent cells.
+3. Deduplication with a time-to-live window so a single hazard produces a single alert.
+4. Move inference off the render loop onto a worker thread.
 
-Create a `.env` file in the project root.
+**Perception**
+5. Two-tier detection: YOLOv8n as a fast per-frame trigger (~20 ms), escalating to the VLM only when a candidate object appears. This is the intended role of the existing `yolo_logic.py`.
+6. Live camera and GPS input in place of a static video file and fixed coordinates.
+7. Explicit distinction between "scene clear" and "inference failed."
 
-Example:
-```
-DATABASE_URL=postgresql://username:password@host:5432/database
-```
----
+**Infrastructure**
+8. Redis as a shared TTL memory layer for hazard state across vehicles.
+9. RabbitMQ or a self-hosted MQTT broker with TLS and per-vehicle credentials.
+10. Docker Compose for one-command setup.
+11. Vehicle registration and heartbeat via the existing `vehicles` table and `/ws/{vehicle_id}` route.
+12. All hardcoded configuration moved to environment variables.
+13. Test suite covering schema validation, the API, and message routing.
 
-## ▶️ Running the Backend
-
-From the project root:
-```
-python -m uvicorn backend.app.main:app --reload
-```
-The backend should then be available at:
-```
-http://127.0.0.1:8000
-```
-FastAPI documentation:
-```
-http://127.0.0.1:8000/docs
-```
-Health check:
-```
-GET /health
-```
----
-
-## 🗃️ Database Migrations
-
-Create a migration after modifying SQLAlchemy models:
-
-alembic revision --autogenerate -m "description"
-
-Apply migrations:
-
-alembic upgrade head
-
-Rollback the latest migration:
-
-alembic downgrade -1
+**Longer term**
+14. Multi-vehicle simulation with more than two nodes.
+15. Relevance scoring and hazard prioritisation.
+16. Real-world transport via C-V2X or DSRC / IEEE 802.11p.
 
 ---
 
-## 🎯 Project Goals
+## Team
 
-The long-term goal of DIVA is to demonstrate how autonomous vehicles can cooperate through distributed AI.
-
-Key objectives include:
-
-- Reduce communication bandwidth.
-- Share only useful semantic information.
-- Enable real-time V2V communication.
-- Maintain temporary vehicle memories.
-- Improve situational awareness.
-- Support decentralized decision making.
-- Reduce dependence on centralized AI processing.
-- Create a scalable architecture suitable for future autonomous vehicle networks.
+| Member | Responsibility |
+|---|---|
+| **Abhishank** | Team Lead — MQTT and communication layer |
+| **Aarit** | Backend and database |
+| **Aniket** | Computer vision |
+| **Antariksh** | Local LLM integration |
+| **Agastaya** | Infrastructure (Redis, Docker — roadmap) |
 
 ---
 
-## 🔮 Future Development
+## License
 
-Planned improvements include:
-
-- Gemma integration for semantic reasoning.
-- Real-time video processing.
-- YOLO / computer vision perception.
-- Complete Vehicle A → Vehicle B pipeline.
-- Redis-based contextual memory.
-- RabbitMQ-based message routing.
-- MQTT-based vehicle communication experiments.
-- Multi-vehicle communication.
-- Vehicle prioritization and routing.
-- Event expiry and relevance scoring.
-- Cloud-hosted database infrastructure.
-- Real-world V2V communication using automotive communication standards.
-- Simulation using multiple virtual vehicles.
+No license has been assigned yet. Until one is added, all rights are reserved and this code is provided for demonstration and evaluation purposes only.
 
 ---
 
-## 🌐 Real-World Deployment
-
-The two-laptop demonstration is only a prototype representation of the communication architecture.
-
-In a real vehicle, the same semantic messages could be transmitted using automotive communication technologies such as:
-
-- C-V2X
-- DSRC / IEEE 802.11p
-- 5G networks
-- Wi-Fi-based communication for testing
-
-The important abstraction remains the same:
-```
-Vehicle Sensor
-      ↓
-Local AI
-      ↓
-Semantic Representation
-      ↓
-V2V Network
-      ↓
-Nearby Vehicle
-      ↓
-Local AI Decision
-```
----
-
-## 👥 Team
-
-### Aarit
-
-Backend and Database Setup
-
-### Abhishank
-
-Team Lead, MQTT and Communication Setup
-
-### Agastaya
-
-Redis and Docker
-
-### Aniket
-
-Computer Vision
-
-### Antariksh
-
-Local LLM Setup
-
----
-
-## 🏁 Vision
-
-DIVA aims to move autonomous vehicles from isolated intelligence toward collaborative intelligence.
-
-Instead of:
-
-"Every vehicle knows only what it can see."
-
-DIVA aims for:
-
-"Every vehicle can benefit from what other vehicles have already learned."
-
-Distributed perception.
-Shared intelligence.
-Safer mobility.
-
----
-
-## 📜 License
-
-This project is currently developed as a research and prototype system.
+*DIVA moves autonomous vehicles from isolated intelligence toward collaborative intelligence — from "every vehicle knows only what it can see" to "every vehicle benefits from what nearby vehicles have already seen."*
