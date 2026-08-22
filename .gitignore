@@ -10,3 +10,4 @@ myenv/
 .vscode/
 .idea/
 .env
+edge_connections/keys/*.key

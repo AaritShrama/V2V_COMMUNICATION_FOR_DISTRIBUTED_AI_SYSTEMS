@@ -1,8 +1,5 @@
-from sqlalchemy import text
-
+from sqlalchemy import text # type: ignore
 from backend.app.db.database import engine
-
-
 with engine.connect() as connection:
     result = connection.execute(text("SELECT 1"))
     print("Database connection successful:", result.scalar())

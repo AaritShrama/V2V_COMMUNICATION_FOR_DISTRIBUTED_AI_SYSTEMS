@@ -1,11 +1,12 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from pydantic_settings import BaseSettings, SettingsConfigDict # type: ignore
 
 
 class Settings(BaseSettings):
-    DATABASE_URL: str ="postgresql://postgres:Gt7ZcKZB1KamI0Dw@db.gpcygulldcccdrsnnxmr.supabase.co:5432/postgres"
+    DATABASE_URL: str = "postgresql://postgres:ChuwKo95U6sK5fJr@db.gpcygulldcccdrsnnxmr.supabase.co:5432/postgres"
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=None,
         env_file_encoding="utf-8",
         extra="ignore",
     )
